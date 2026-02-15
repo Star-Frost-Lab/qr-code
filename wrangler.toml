@@ -1,0 +1,46 @@
+# Wrangler 配置文件
+# Live-Edge Dual-Mode System
+
+name = "live-edge-system"
+main = "worker.js"
+compatibility_date = "2026-01-01"
+
+# 环境变量
+[vars]
+# 敏感环境变量（通过 wrangler secret put 设置）
+# 管理员密码 - 必需！
+# 设置方法：wrangler secret put ADMIN_PASSWORD
+
+ADMIN_PASSWORD = " "
+
+[[kv_namespaces]]
+binding = "ASSET_KV"
+id = " "          # 替换为实际的 KV ID
+
+# Durable Objects
+[[durable_objects.bindings]]
+name = "CONNECTION_MANAGER"
+class_name = "ConnectionManager"
+script_name = "live-edge-system"
+
+# Durable Objects 迁移
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["ConnectionManager"]
+
+
+# 下面是日志功能、可选（直接删除
+[observability]
+enabled = false
+head_sampling_rate = 1
+
+[observability.logs]
+enabled = true
+head_sampling_rate = 1
+persist = true
+invocation_logs = true
+
+[observability.traces]
+enabled = false
+persist = true
+head_sampling_rate = 1
