@@ -675,6 +675,8 @@ async function handleAdminAPI(request, env) {
       type: data.type || 'normal', // normal | auth | contact
       content: data.content || '',
       privateContent: data.privateContent || '', // 仅用于授权码
+      location: data.location || data.privateLocation || '', // 位置信息，所有类型都支持
+      privateLocation: data.location || data.privateLocation || '', // 兼容旧字段
       image: data.image || '',
       created_at: Date.now(),
       updated_at: Date.now()
@@ -1251,6 +1253,7 @@ async function handleChatRequest(request, env) {
       token,
       geo,
       message,
+      location: null,  // 初始聊天请求没有位置
       baseUrl: config.base_url
     });
   }
@@ -1691,7 +1694,7 @@ async function sendWeChatAppNotification(env, { qrId, requestId, qrTitle, token,
 /**
  * 发送企业微信通知 - 聊天请求
  */
-async function sendWeChatChatNotification(env, { qrId, sessionId, qrTitle, token, geo, message: userMessage, baseUrl }) {
+async function sendWeChatChatNotification(env, { qrId, sessionId, qrTitle, token, geo, message: userMessage, location, baseUrl }) {
   const config = await env.ASSET_KV.get('config:system', 'json') || {};
   
   const base = baseUrl || config.base_url || 'https://your-worker.com';
@@ -1773,7 +1776,7 @@ async function sendWeChatChatNotification(env, { qrId, sessionId, qrTitle, token
   }
   
   // 3. 发送自定义渠道通知
-  await sendCustomChannelNotifications(env, 'chat', { qrId, sessionId, qrTitle, token, geo, message: userMessage, baseUrl });
+  await sendCustomChannelNotifications(env, 'chat', { qrId, sessionId, qrTitle, token, geo, message: userMessage, location, baseUrl });
 }
 
 /**
@@ -1855,13 +1858,25 @@ function prepareTemplateData(notifyType, data) {
       reject_url: `${base}/approve?token=${encodeURIComponent(data.token || '')}&action=reject`
     };
   } else if (notifyType === 'chat') {
-    return {
+    const chatData = {
       ...commonData,
       session_id: data.sessionId || '',
       user_message: data.message || '',
       accept_url: `${base}/chat-decision?token=${encodeURIComponent(data.token || '')}&action=accept`,
-      reject_url: `${base}/chat-decision?token=${encodeURIComponent(data.token || '')}&action=reject`
+      reject_url: `${base}/chat-decision?token=${encodeURIComponent(data.token || '')}&action=reject`,
+      user_latitude: '',
+      user_longitude: '',
+      user_location_text: ''
     };
+    
+    // 添加位置变量（如果有）
+    if (data.location && data.location.latitude && data.location.longitude) {
+      chatData.user_latitude = data.location.latitude.toString();
+      chatData.user_longitude = data.location.longitude.toString();
+      chatData.user_location_text = `${data.location.latitude},${data.location.longitude}`;
+    }
+    
+    return chatData;
   }
   
   return commonData;
@@ -2124,6 +2139,33 @@ function getAdminDashboard() {
             <!-- 自定义渠道列表将在这里动态显示 -->
           </div>
           
+          <!-- 地图API配置 -->
+          <h3 style="margin:32px 0 16px;color:#333;font-size:18px;border-bottom:2px solid #e0e0e0;padding-bottom:12px;">🗺️ 地图API配置</h3>
+          <div style="background:#fef3c7;padding:16px;border-radius:8px;margin-bottom:20px;border-left:4px solid #f59e0b;">
+            <div style="font-size:13px;color:#92400e;">
+              📍 配置地图API后，可在聊天中发送位置，在授权内容中显示位置并支持导航
+            </div>
+          </div>
+          
+          <div class="form-group">
+            <label>地图服务商</label>
+            <select id="mapProvider" name="map_provider">
+              <option value="">不启用地图功能</option>
+              <option value="amap">高德地图</option>
+              <option value="baidu">百度地图</option>
+            </select>
+            <div style="font-size:12px;color:#999;margin-top:4px;">选择地图服务商以启用位置功能</div>
+          </div>
+          
+          <div class="form-group">
+            <label>地图API Key (Web端密钥)</label>
+            <input type="text" id="mapApiKey" name="map_api_key" placeholder="请输入地图服务商的Web端API Key">
+            <div style="font-size:12px;color:#999;margin-top:4px;">
+              <a href="https://lbs.amap.com/api/javascript-api-v2/guide/abc/prepare" target="_blank" style="color:#3b82f6;">高德地图申请</a> | 
+              <a href="https://lbsyun.baidu.com/apiconsole/key" target="_blank" style="color:#3b82f6;">百度地图申请</a>
+            </div>
+          </div>
+          
           <div style="display:flex;gap:12px;margin-top:24px;">
             <button type="submit" class="btn btn-primary">💾 保存设置</button>
             <button type="button" class="btn" style="background:#8b5cf6;color:white;" onclick="testNotification(event)">🧪 测试通知</button>
@@ -2158,6 +2200,19 @@ function getAdminDashboard() {
         <div class="form-group" id="privateContentGroup" style="display:none;">
           <label>私密内容 (仅授权后显示)</label>
           <textarea id="qrPrivateContent" name="privateContent"></textarea>
+        </div>
+        
+        <div class="form-group">
+          <label>位置信息 <span style="color:#999;font-weight:normal;font-size:12px;">(可选)</span></label>
+          <div style="display:flex;gap:8px;align-items:flex-end;">
+            <input type="text" id="qrLocation" name="location" placeholder="经度,纬度 例如：116.397428,39.90923" style="flex:1;">
+            <button type="button" class="btn" style="background:#667eea;color:white;padding:12px 20px;" onclick="getCurrentLocation()">📍 获取当前位置</button>
+          </div>
+          <div style="font-size:12px;color:#999;margin-top:4px;">
+            <span style="color:#10b981;">✓ 普通二维码</span>：扫码后直接显示位置并支持导航<br>
+            <span style="color:#3b82f6;">✓ 授权二维码</span>：批准后显示位置<br>
+            <span style="color:#f59e0b;">✓ 联系二维码</span>：在联系详情中显示位置
+          </div>
         </div>
         
         <div class="form-group">
@@ -2201,8 +2256,11 @@ function getAdminDashboard() {
       
       <div style="display:flex;gap:8px;margin-top:16px;align-items:flex-end;">
         <input type="file" id="adminImageInput" accept="image/*" onchange="uploadAdminImage(this)" style="display:none;">
-        <button class="btn" style="background:#f0f0f0;color:#333;padding:12px 16px;border-radius:10px;" onclick="document.getElementById('adminImageInput').click()">
+        <button class="btn" style="background:#f0f0f0;color:#333;padding:12px 16px;border-radius:10px;" onclick="document.getElementById('adminImageInput').click()" title="发送图片">
           📎
+        </button>
+        <button class="btn" style="background:#f0f0f0;color:#333;padding:12px 16px;border-radius:10px;" onclick="sendAdminLocation()" title="发送位置">
+          📍
         </button>
         <textarea id="adminChatInput" placeholder="输入消息..." style="flex:1;padding:12px;border:2px solid #e0e0e0;border-radius:10px;font-size:14px;resize:none;font-family:inherit;" rows="2" onkeypress="if(event.key==='Enter' && !event.shiftKey) { event.preventDefault(); sendAdminMessage(); }"></textarea>
         <button class="btn btn-primary" style="padding:12px 24px;border-radius:10px;" onclick="sendAdminMessage()">发送</button>
@@ -2349,7 +2407,30 @@ function getAdminDashboard() {
   </div>
   
   <!-- 变量帮助模态框(续 -->
-  <div id="variableHelpModal" class="modal"><div class="modal-content" style="max-width:700px;max-height:90vh;overflow-y:auto;"><h2 style="margin-bottom:20px;">📖 可用变量说明</h2><div style="text-align:right;margin-bottom:20px;"><button onclick="closeVariableHelp()" style="background:#e0e0e0;border:none;padding:8px 16px;border-radius:6px;cursor:pointer;">关闭</button></div><div style="background:#f9fafb;padding:20px;border-radius:8px;margin-bottom:20px;"><h3 style="font-size:16px;margin-bottom:12px;color:#333;">🔐 授权通知变量</h3><table style="width:100%;font-size:13px;border-collapse:collapse;"><tr><td style="padding:8px;background:white;border:1px solid #e0e0e0;width:40%;"><code>{{qr_id}}</code></td><td style="padding:8px;background:white;border:1px solid #e0e0e0;">二维码ID</td></tr><tr><td style="padding:8px;background:white;border:1px solid #e0e0e0;"><code>{{qr_title}}</code></td><td style="padding:8px;background:white;border:1px solid #e0e0e0;">二维码标题</td></tr><tr><td style="padding:8px;background:white;border:1px solid #e0e0e0;"><code>{{request_id}}</code></td><td style="padding:8px;background:white;border:1px solid #e0e0e0;">请求ID</td></tr><tr><td style="padding:8px;background:white;border:1px solid #e0e0e0;"><code>{{approve_url}}</code></td><td style="padding:8px;background:white;border:1px solid #e0e0e0;">批准链接</td></tr><tr><td style="padding:8px;background:white;border:1px solid #e0e0e0;"><code>{{reject_url}}</code></td><td style="padding:8px;background:white;border:1px solid #e0e0e0;">拒绝链接</td></tr><tr><td style="padding:8px;background:white;border:1px solid #e0e0e0;"><code>{{geo_city}}</code></td><td style="padding:8px;background:white;border:1px solid #e0e0e0;">访问城市</td></tr><tr><td style="padding:8px;background:white;border:1px solid #e0e0e0;"><code>{{geo_country}}</code></td><td style="padding:8px;background:white;border:1px solid #e0e0e0;">访问国家</td></tr><tr><td style="padding:8px;background:white;border:1px solid #e0e0e0;"><code>{{timestamp}}</code></td><td style="padding:8px;background:white;border:1px solid #e0e0e0;">Unix时间戳</td></tr><tr><td style="padding:8px;background:white;border:1px solid #e0e0e0;"><code>{{time_formatted}}</code></td><td style="padding:8px;background:white;border:1px solid #e0e0e0;">格式化时间</td></tr></table></div><div style="background:#f0fdf4;padding:20px;border-radius:8px;margin-bottom:20px;"><h3 style="font-size:16px;margin-bottom:12px;color:#333;">💬 聊天通知变量</h3><table style="width:100%;font-size:13px;border-collapse:collapse;"><tr><td style="padding:8px;background:white;border:1px solid #e0e0e0;width:40%;"><code>{{session_id}}</code></td><td style="padding:8px;background:white;border:1px solid #e0e0e0;">会话ID</td></tr><tr><td style="padding:8px;background:white;border:1px solid #e0e0e0;"><code>{{user_message}}</code></td><td style="padding:8px;background:white;border:1px solid #e0e0e0;">用户消息内容</td></tr><tr><td style="padding:8px;background:white;border:1px solid #e0e0e0;"><code>{{accept_url}}</code></td><td style="padding:8px;background:white;border:1px solid #e0e0e0;">接受链接</td></tr></table></div><div style="background:#fffbeb;padding:16px;border-radius:8px;margin-bottom:20px;"><h3 style="font-size:14px;margin-bottom:8px;color:#92400e;">💡 示例</h3><pre style="background:white;padding:12px;border-radius:6px;overflow-x:auto;font-size:12px;line-height:1.6;"><code>{"text": "🔔 授权请求", "title": "{{qr_title}}", "location": "{{geo_city}}"}</code></pre></div></div></div>
+  <div id="variableHelpModal" class="modal"><div class="modal-content" style="max-width:700px;max-height:90vh;overflow-y:auto;"><h2 style="margin-bottom:20px;">📖 可用变量说明</h2><div style="text-align:right;margin-bottom:20px;"><button onclick="closeVariableHelp()" style="background:#e0e0e0;border:none;padding:8px 16px;border-radius:6px;cursor:pointer;">关闭</button></div><div style="background:#f9fafb;padding:20px;border-radius:8px;margin-bottom:20px;"><h3 style="font-size:16px;margin-bottom:12px;color:#333;">🔐 授权通知变量</h3><table style="width:100%;font-size:13px;border-collapse:collapse;"><tr><td style="padding:8px;background:white;border:1px solid #e0e0e0;width:40%;"><code>{{qr_id}}</code></td><td style="padding:8px;background:white;border:1px solid #e0e0e0;">二维码ID</td></tr><tr><td style="padding:8px;background:white;border:1px solid #e0e0e0;"><code>{{qr_title}}</code></td><td style="padding:8px;background:white;border:1px solid #e0e0e0;">二维码标题</td></tr><tr><td style="padding:8px;background:white;border:1px solid #e0e0e0;"><code>{{request_id}}</code></td><td style="padding:8px;background:white;border:1px solid #e0e0e0;">请求ID</td></tr><tr><td style="padding:8px;background:white;border:1px solid #e0e0e0;"><code>{{approve_url}}</code></td><td style="padding:8px;background:white;border:1px solid #e0e0e0;">批准链接</td></tr><tr><td style="padding:8px;background:white;border:1px solid #e0e0e0;"><code>{{reject_url}}</code></td><td style="padding:8px;background:white;border:1px solid #e0e0e0;">拒绝链接</td></tr><tr><td style="padding:8px;background:white;border:1px solid #e0e0e0;"><code>{{geo_city}}</code></td><td style="padding:8px;background:white;border:1px solid #e0e0e0;">访问城市</td></tr><tr><td style="padding:8px;background:white;border:1px solid #e0e0e0;"><code>{{geo_country}}</code></td><td style="padding:8px;background:white;border:1px solid #e0e0e0;">访问国家</td></tr><tr><td style="padding:8px;background:white;border:1px solid #e0e0e0;"><code>{{timestamp}}</code></td><td style="padding:8px;background:white;border:1px solid #e0e0e0;">Unix时间戳</td></tr><tr><td style="padding:8px;background:white;border:1px solid #e0e0e0;"><code>{{time_formatted}}</code></td><td style="padding:8px;background:white;border:1px solid #e0e0e0;">格式化时间</td></tr></table></div><div style="background:#f0fdf4;padding:20px;border-radius:8px;margin-bottom:20px;"><h3 style="font-size:16px;margin-bottom:12px;color:#333;">💬 聊天通知变量</h3><table style="width:100%;font-size:13px;border-collapse:collapse;"><tr><td style="padding:8px;background:white;border:1px solid #e0e0e0;width:40%;"><code>{{session_id}}</code></td><td style="padding:8px;background:white;border:1px solid #e0e0e0;">会话ID</td></tr><tr><td style="padding:8px;background:white;border:1px solid #e0e0e0;"><code>{{user_message}}</code></td><td style="padding:8px;background:white;border:1px solid #e0e0e0;">用户消息内容</td></tr><tr><td style="padding:8px;background:white;border:1px solid #e0e0e0;"><code>{{accept_url}}</code></td><td style="padding:8px;background:white;border:1px solid #e0e0e0;">接受链接</td></tr><tr><td style="padding:8px;background:white;border:1px solid #e0e0e0;"><code>{{user_latitude}}</code></td><td style="padding:8px;background:white;border:1px solid #e0e0e0;">用户位置纬度（如有）</td></tr><tr><td style="padding:8px;background:white;border:1px solid #e0e0e0;"><code>{{user_longitude}}</code></td><td style="padding:8px;background:white;border:1px solid #e0e0e0;">用户位置经度（如有）</td></tr><tr><td style="padding:8px;background:white;border:1px solid #e0e0e0;"><code>{{user_location_text}}</code></td><td style="padding:8px;background:white;border:1px solid #e0e0e0;">用户位置文本（如有）</td></tr></table></div><div style="background:#fffbeb;padding:16px;border-radius:8px;margin-bottom:20px;"><h3 style="font-size:14px;margin-bottom:8px;color:#92400e;">💡 示例</h3><pre style="background:white;padding:12px;border-radius:6px;overflow-x:auto;font-size:12px;line-height:1.6;"><code>{"text": "🔔 授权请求", "title": "{{qr_title}}", "location": "{{geo_city}}"}</code></pre></div></div></div>
+
+  <!-- 通用确认对话框 -->
+  <div id="confirmDialog" class="modal">
+    <div class="modal-content" style="max-width:450px;text-align:center;">
+      <div id="confirmIcon" style="font-size:64px;margin-bottom:20px;">⚠️</div>
+      <h2 id="confirmTitle" style="margin:0 0 12px 0;font-size:22px;color:#333;">确认操作</h2>
+      <p id="confirmMessage" style="color:#666;font-size:15px;line-height:1.6;margin-bottom:28px;">确定要执行此操作吗？</p>
+      <div style="display:flex;gap:12px;">
+        <button id="confirmCancelBtn" class="btn" style="flex:1;background:#e0e0e0;color:#666;padding:14px;font-size:15px;" onclick="closeConfirmDialog()">取消</button>
+        <button id="confirmOkBtn" class="btn btn-primary" style="flex:1;padding:14px;font-size:15px;">确定</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- 通用提示对话框 -->
+  <div id="alertDialog" class="modal">
+    <div class="modal-content" style="max-width:420px;text-align:center;">
+      <div id="alertIcon" style="font-size:64px;margin-bottom:20px;">ℹ️</div>
+      <h2 id="alertTitle" style="margin:0 0 12px 0;font-size:22px;color:#333;">提示</h2>
+      <p id="alertMessage" style="color:#666;font-size:15px;line-height:1.6;margin-bottom:28px;">操作提示信息</p>
+      <button class="btn btn-primary" style="width:100%;padding:14px;font-size:15px;" onclick="closeAlertDialog()">知道了</button>
+    </div>
+  </div>
 
   <script>
     let ws = null;
@@ -2403,10 +2484,11 @@ function getAdminDashboard() {
       if (data.type === 'chat_message' && data.from === 'user') {
         // 如果聊天窗口打开且是当前会话，显示消息
         if (currentChatSession === data.sessionId) {
-          addAdminChatMessage(data.message, 'user', data.imageUrl, data.timestamp);
+          addAdminChatMessage(data.message, 'user', data.imageUrl, data.timestamp, data.location);
         } else {
           // 否则显示通知
-          showNotification('新消息', \`收到来自访客的消息\`, [
+          const notifText = data.location ? '收到位置消息' : '收到来自访客的消息';
+          showNotification('新消息', \`\${notifText}\`, [
             { text: '查看', class: 'btn-primary', onclick: \`openExistingChat('\${data.qrId}', '\${data.sessionId}')\` }
           ]);
         }
@@ -2561,7 +2643,7 @@ function getAdminDashboard() {
       currentChatQrId = null;
     }
     
-    function addAdminChatMessage(message, from, imageUrl, time) {
+    function addAdminChatMessage(message, from, imageUrl, time, location) {
       const messagesContainer = document.getElementById('adminChatMessages');
       const messageDiv = document.createElement('div');
       messageDiv.className = \`chat-message \${from}\`;
@@ -2594,6 +2676,24 @@ function getAdminDashboard() {
         const contentDiv = document.createElement('div');
         contentDiv.innerHTML = marked.parse(message);
         bubble.appendChild(contentDiv);
+      }
+      
+      // 添加位置显示
+      if (location && location.latitude && location.longitude) {
+        const locationDiv = document.createElement('div');
+        locationDiv.style.cssText = 'margin-top:8px;padding:10px;background:rgba(255,255,255,0.15);border-radius:6px;font-size:13px;';
+        
+        const lat = location.latitude.toFixed(6);
+        const lng = location.longitude.toFixed(6);
+        
+        locationDiv.innerHTML = \`
+          <div style="font-weight:600;margin-bottom:6px;">📍 位置信息</div>
+          <div style="font-size:12px;opacity:0.9;">经度: \${lng}</div>
+          <div style="font-size:12px;opacity:0.9;margin-bottom:8px;">纬度: \${lat}</div>
+          <button style="background:rgba(255,255,255,0.9);color:#333;border:none;padding:6px 12px;border-radius:6px;font-size:12px;cursor:pointer;font-weight:600;" onclick="openMapNavigation(\${lat}, \${lng})">🧭 查看地图</button>
+        \`;
+        
+        bubble.appendChild(locationDiv);
       }
       
       if (imageUrl) {
@@ -2647,7 +2747,11 @@ function getAdminDashboard() {
         }
       } catch (e) {
         console.error('Upload error:', e);
-        alert('图片上传失败');
+        showAlert({
+          title: '上传失败',
+          message: '图片上传失败，请重试',
+          icon: '❌'
+        });
       }
     }
     
@@ -2685,6 +2789,174 @@ function getAdminDashboard() {
         // 清空输入
         input.value = '';
         clearAdminImage();
+      }
+    }
+    
+    // 发送位置
+    async function sendAdminLocation() {
+      if (!ws || ws.readyState !== WebSocket.OPEN || !currentChatSession) {
+        showAlert({
+          title: '无法发送',
+          message: '未连接到聊天，请稍后再试',
+          icon: '⚠️'
+        });
+        return;
+      }
+      
+      // 检查浏览器是否支持地理位置
+      if (!navigator.geolocation) {
+        showAlert({
+          title: '不支持',
+          message: '您的浏览器不支持地理位置功能',
+          icon: '❌'
+        });
+        return;
+      }
+      
+      // 显示加载提示
+      const loadingMsg = document.createElement('div');
+      loadingMsg.style.cssText = 'position:fixed;top:50%;left:50%;transform:translate(-50%,-50%);background:rgba(0,0,0,0.8);color:white;padding:20px 40px;border-radius:8px;z-index:10000;';
+      loadingMsg.textContent = '正在获取位置信息...';
+      document.body.appendChild(loadingMsg);
+      
+      try {
+        // 获取位置
+        const position = await new Promise((resolve, reject) => {
+          navigator.geolocation.getCurrentPosition(resolve, reject, {
+            enableHighAccuracy: true,
+            timeout: 10000,
+            maximumAge: 0
+          });
+        });
+        
+        const latitude = position.coords.latitude;
+        const longitude = position.coords.longitude;
+        
+        // 发送位置消息
+        ws.send(JSON.stringify({
+          type: 'chat_message',
+          payload: {
+            qrId: currentChatQrId,
+            sessionId: currentChatSession,
+            from: 'admin',
+            message: '',
+            location: {
+              latitude: latitude,
+              longitude: longitude,
+              accuracy: position.coords.accuracy
+            },
+            timestamp: Date.now()
+          },
+          to: 'user'
+        }));
+        
+        // 在聊天窗口显示位置消息
+        const locationText = '📍 位置: ' + latitude.toFixed(6) + ', ' + longitude.toFixed(6);
+        addAdminChatMessage(locationText, 'admin', null, Date.now());
+        
+      } catch (error) {
+        let errorMsg = '获取位置失败';
+        if (error.code === 1) {
+          errorMsg = '您拒绝了位置权限请求';
+        } else if (error.code === 2) {
+          errorMsg = '无法获取位置信息';
+        } else if (error.code === 3) {
+          errorMsg = '获取位置超时';
+        }
+        showAlert({
+          title: '位置获取失败',
+          message: errorMsg,
+          icon: '❌'
+        });
+      } finally {
+        document.body.removeChild(loadingMsg);
+      }
+    }
+    
+    // 打开地图导航
+    async function openMapNavigation(latitude, longitude) {
+      try {
+        const response = await fetch('/api/admin/config');
+        const config = await response.json();
+        
+        const mapProvider = config.map_provider;
+        
+        if (!mapProvider) {
+          showAlert({
+            title: '地图未配置',
+            message: '地图功能未启用，请在系统设置中配置地图API',
+            icon: '⚠️'
+          });
+          return;
+        }
+        
+        let url;
+        let webUrl; // 备用网页版URL
+        
+        if (mapProvider === 'amap') {
+          // 检测系统类型
+          const ua = navigator.userAgent.toLowerCase();
+          const isIOS = /iphone|ipad|ipod/.test(ua);
+          const isAndroid = /android/.test(ua);
+          
+          if (isIOS) {
+            // iOS使用iosamap://scheme
+            url = \`iosamap://navi?sourceApplication=webapp&lat=\${latitude}&lon=\${longitude}&name=位置&dev=0&style=2\`;
+          } else if (isAndroid) {
+            // Android使用androidamap://scheme
+            url = \`androidamap://navi?sourceApplication=webapp&lat=\${latitude}&lon=\${longitude}&name=位置&dev=0&style=2\`;
+          }
+          // 备用网页版
+          webUrl = \`https://uri.amap.com/navigation?to=\${longitude},\${latitude},位置&mode=car&src=webapp\`;
+        } else if (mapProvider === 'baidu') {
+          // 百度地图使用baidumap://scheme
+          url = \`baidumap://map/direction?destination=\${latitude},\${longitude}&mode=driving&coord_type=gcj02&src=webapp\`;
+          // 备用网页版
+          webUrl = \`http://api.map.baidu.com/direction?destination=latlng:\${latitude},\${longitude}|name=位置&mode=driving&src=webapp\`;
+        }
+        
+        // 使用iframe方式尝试唤起APP
+        if (url) {
+          const iframe = document.createElement('iframe');
+          iframe.style.display = 'none';
+          iframe.src = url;
+          document.body.appendChild(iframe);
+          
+          // 设置定时器，如果2秒后还在当前页面，说明没有安装APP，则打开网页版
+          const timer = setTimeout(() => {
+            if (webUrl) {
+              window.open(webUrl, '_blank');
+            }
+          }, 2000);
+          
+          // 监听页面可见性变化，如果页面隐藏说明APP被唤起
+          const visibilityChange = () => {
+            if (document.hidden) {
+              clearTimeout(timer);
+              document.removeEventListener('visibilitychange', visibilityChange);
+            }
+          };
+          document.addEventListener('visibilitychange', visibilityChange);
+          
+          // 1秒后清理iframe
+          setTimeout(() => {
+            if (iframe && iframe.parentNode) {
+              document.body.removeChild(iframe);
+            }
+          }, 1000);
+        } else {
+          // 如果没有URL Scheme，直接打开网页版
+          if (webUrl) {
+            window.open(webUrl, '_blank');
+          }
+        }
+      } catch (error) {
+        console.error('Open map failed:', error);
+        showAlert({
+          title: '打开失败',
+          message: '打开地图失败，请重试',
+          icon: '❌'
+        });
       }
     }
     
@@ -2798,7 +3070,7 @@ function getAdminDashboard() {
           const messages = chatData.sessions[sessionId].messages || [];
           
           messages.forEach(msg => {
-            addHistoryMessage(msg.message, msg.from, msg.imageUrl, msg.timestamp);
+            addHistoryMessage(msg.message, msg.from, msg.imageUrl, msg.timestamp, msg.location);
           });
         }
         
@@ -2809,7 +3081,7 @@ function getAdminDashboard() {
       }
     }
     
-    function addHistoryMessage(message, from, imageUrl, time) {
+    function addHistoryMessage(message, from, imageUrl, time, location) {
       const messagesContainer = document.getElementById('historyMessages');
       const messageDiv = document.createElement('div');
       messageDiv.style.marginBottom = '16px';
@@ -2853,6 +3125,24 @@ function getAdminDashboard() {
         bubble.appendChild(img);
       }
       
+      // 显示位置信息
+      if (location && location.latitude && location.longitude) {
+        const locationDiv = document.createElement('div');
+        locationDiv.style.cssText = 'margin-top:8px;padding:10px;background:rgba(255,255,255,0.15);border-radius:6px;font-size:13px;';
+        
+        const lat = location.latitude.toFixed(6);
+        const lng = location.longitude.toFixed(6);
+        
+        locationDiv.innerHTML = \`
+          <div style="font-weight:600;margin-bottom:6px;">📍 位置信息</div>
+          <div style="font-size:12px;opacity:0.9;">经度: \${lng}</div>
+          <div style="font-size:12px;opacity:0.9;margin-bottom:8px;">纬度: \${lat}</div>
+          <button style="background:rgba(255,255,255,0.9);color:#333;border:none;padding:6px 12px;border-radius:6px;font-size:12px;cursor:pointer;font-weight:600;" onclick="openMapNavigation(\${lat}, \${lng})">🧭 查看地图</button>
+        \`;
+        
+        bubble.appendChild(locationDiv);
+      }
+      
       if (time) {
         const timeDiv = document.createElement('div');
         timeDiv.style.fontSize = '11px';
@@ -2871,26 +3161,42 @@ function getAdminDashboard() {
     }
     
     async function confirmDeleteChatHistory() {
-      if (!confirm('确定要删除此聊天记录吗？此操作不可恢复！')) {
-        return;
-      }
-      
-      try {
-        const response = await fetch(\`/api/admin/qrcodes/\${currentHistoryQrId}/chat/\${currentHistorySessionId}\`, {
-          method: 'DELETE'
-        });
-        
-        if (response.ok) {
-          alert('删除成功');
-          closeChatHistoryModal();
-          loadChatHistory();
-        } else {
-          throw new Error('Delete failed');
+      showConfirm({
+        title: '🗑️ 删除聊天记录',
+        message: '确定要删除此聊天记录吗？此操作不可恢复！',
+        icon: '⚠️',
+        confirmText: '删除',
+        cancelText: '取消',
+        confirmColor: '#ef4444',
+        onConfirm: async () => {
+          try {
+            const response = await fetch(\`/api/admin/qrcodes/\${currentHistoryQrId}/chat/\${currentHistorySessionId}\`, {
+              method: 'DELETE'
+            });
+            
+            if (response.ok) {
+              showAlert({
+                title: '删除成功',
+                message: '聊天记录已成功删除',
+                icon: '✅',
+                onClose: () => {
+                  closeChatHistoryModal();
+                  loadChatHistory();
+                }
+              });
+            } else {
+              throw new Error('Delete failed');
+            }
+          } catch (e) {
+            console.error('Delete failed:', e);
+            showAlert({
+              title: '删除失败',
+              message: '删除失败，请重试',
+              icon: '❌'
+            });
+          }
         }
-      } catch (e) {
-        console.error('Delete failed:', e);
-        alert('删除失败，请重试');
-      }
+      });
     }
     
     function showCreateModal(type) {
@@ -2915,6 +3221,7 @@ function getAdminDashboard() {
         document.getElementById('qrTitle').value = qr.title;
         document.getElementById('qrContent').value = qr.content || '';
         document.getElementById('qrPrivateContent').value = qr.privateContent || '';
+        document.getElementById('qrLocation').value = qr.location || qr.privateLocation || '';
         document.getElementById('privateContentGroup').style.display = qr.type === 'auth' ? 'block' : 'none';
         currentImageUrl = qr.image || '';
         document.getElementById('qrModal').classList.add('show');
@@ -2931,6 +3238,7 @@ function getAdminDashboard() {
             document.getElementById('qrTitle').value = qr.title;
             document.getElementById('qrContent').value = qr.content || '';
             document.getElementById('qrPrivateContent').value = qr.privateContent || '';
+            document.getElementById('qrLocation').value = qr.location || qr.privateLocation || '';
             document.getElementById('privateContentGroup').style.display = qr.type === 'auth' ? 'block' : 'none';
             currentImageUrl = qr.image || '';
             document.getElementById('qrModal').classList.add('show');
@@ -2952,6 +3260,7 @@ function getAdminDashboard() {
         type: type,
         content: formData.get('content'),
         privateContent: formData.get('privateContent'),
+        location: formData.get('location'),
         image: currentImageUrl
       };
       
@@ -3080,6 +3389,89 @@ function getAdminDashboard() {
       if (result.success) {
         currentImageUrl = result.url;
         document.getElementById('imagePreview').innerHTML = \`<img src="\${result.url}" style="max-width:100%;max-height:200px;margin-top:12px;">\`;
+      }
+    }
+    
+    // 获取当前位置并填入表单
+    async function getCurrentLocation() {
+      if (!navigator.geolocation) {
+        showAlert({
+          title: '不支持定位',
+          message: '您的浏览器不支持地理位置功能，请使用最新版本的Chrome、Firefox或Safari浏览器',
+          icon: '❌'
+        });
+        return;
+      }
+      
+      const loadingMsg = document.createElement('div');
+      loadingMsg.style.cssText = 'position:fixed;top:50%;left:50%;transform:translate(-50%,-50%);background:rgba(0,0,0,0.8);color:white;padding:20px 40px;border-radius:8px;z-index:10000;';
+      loadingMsg.textContent = '正在获取位置信息...';
+      document.body.appendChild(loadingMsg);
+      
+      try {
+        const position = await new Promise((resolve, reject) => {
+          navigator.geolocation.getCurrentPosition(resolve, reject, {
+            enableHighAccuracy: true,
+            timeout: 10000,
+            maximumAge: 0
+          });
+        });
+        
+        const lat = position.coords.latitude;
+        const lng = position.coords.longitude;
+        
+        // 填入表单（经度,纬度）
+        document.getElementById('qrLocation').value = lng.toFixed(6) + ',' + lat.toFixed(6);
+        
+        showSuccessToast('位置获取成功！');
+        
+      } catch (error) {
+        let title = '位置获取失败';
+        let message = '';
+        let icon = '❌';
+        
+        if (error.code === 1) {
+          // 用户拒绝授权
+          title = '需要位置权限';
+          message = '请允许浏览器访问您的位置信息。\\n\\n' +
+                   '💡 如何开启：\\n' +
+                   '1. 点击浏览器地址栏左侧的 🔒 图标\\n' +
+                   '2. 找到"位置"权限\\n' +
+                   '3. 选择"允许"';
+          icon = '📍';
+        } else if (error.code === 2) {
+          // 无法获取位置
+          title = '无法获取位置';
+          message = '无法获取您的位置信息，可能原因：\\n\\n' +
+                   '📱 手机定位服务未开启\\n' +
+                   '• Android: 设置 → 位置 → 开启\\n' +
+                   '• iOS: 设置 → 隐私 → 定位服务 → 开启\\n\\n' +
+                   '🌐 网络连接问题\\n' +
+                   '• 请检查您的网络连接\\n\\n' +
+                   '🔒 需要HTTPS\\n' +
+                   '• 定位功能需要安全连接';
+          icon = '⚠️';
+        } else if (error.code === 3) {
+          // 超时
+          title = '获取超时';
+          message = '获取位置超时，请重试。\\n\\n' +
+                   '可能原因：\\n' +
+                   '• GPS信号较弱（请移至空旷处）\\n' +
+                   '• 网络较慢\\n' +
+                   '• 手机定位服务未开启';
+          icon = '⏱️';
+        } else {
+          // 其他错误
+          message = '获取位置时发生未知错误，请重试';
+        }
+        
+        showAlert({
+          title: title,
+          message: message,
+          icon: icon
+        });
+      } finally {
+        document.body.removeChild(loadingMsg);
       }
     }
     
@@ -3224,9 +3616,54 @@ function getAdminDashboard() {
     }
     
     async function deleteQR(id) {
-      if (!confirm('确定要删除此二维码吗?')) return;
-      await fetch(\`/api/admin/qrcodes/\${id}\`, { method: 'DELETE' });
-      loadQRCodes();
+      showConfirm({
+        title: '🗑️ 删除二维码',
+        message: '确定要删除此二维码吗？删除后无法恢复！',
+        icon: '⚠️',
+        confirmText: '删除',
+        cancelText: '取消',
+        confirmColor: '#ef4444',
+        onConfirm: async () => {
+          // 找到对应的卡片
+          const card = document.querySelector(\`.qr-card[data-qr-id="\${id}"]\`);
+          
+          if (card) {
+            // 添加淡出动画
+            card.style.transition = 'all 0.3s ease-out';
+            card.style.opacity = '0';
+            card.style.transform = 'scale(0.95) translateX(-20px)';
+            
+            // 等待动画完成后再删除
+            await new Promise(resolve => setTimeout(resolve, 300));
+          }
+          
+          // 删除二维码
+          const response = await fetch(\`/api/admin/qrcodes/\${id}\`, { method: 'DELETE' });
+          
+          if (response.ok) {
+            // 从DOM中移除
+            if (card) {
+              card.remove();
+            }
+            
+            // 从缓存中删除
+            delete cachedQRCodes[id];
+            
+            showSuccessToast('二维码已删除');
+          } else {
+            showAlert({
+              title: '删除失败',
+              message: '删除二维码失败，请重试',
+              icon: '❌'
+            });
+            // 恢复卡片
+            if (card) {
+              card.style.opacity = '1';
+              card.style.transform = 'scale(1) translateX(0)';
+            }
+          }
+        }
+      });
     }
     
     function getTypeName(type) {
@@ -3252,6 +3689,10 @@ function getAdminDashboard() {
       document.getElementById('enableApp').checked = config.enable_app || false;
       toggleAppFields();
       
+      // 加载地图配置
+      document.getElementById('mapProvider').value = config.map_provider || '';
+      document.getElementById('mapApiKey').value = config.map_api_key || '';
+      
       // 加载自定义渠道
       loadCustomChannels();
     }
@@ -3275,8 +3716,10 @@ function getAdminDashboard() {
         container.innerHTML = channels.map(function(ch) {
           const typeText = ch.notifyType === 'both' ? '授权 + 聊天' : (ch.notifyType === 'auth' ? '仅授权' : '仅聊天');
           const statusBadge = ch.enabled ? '<span style="background:#10b981;color:white;padding:4px 10px;border-radius:6px;font-size:11px;font-weight:600;">✓ 已启用</span>' : '<span style="background:#ef4444;color:white;padding:4px 10px;border-radius:6px;font-size:11px;font-weight:600;">✗ 已禁用</span>';
+          const enabledBorder = ch.enabled ? '#10b981' : '#e0e0e0';
+          const enabledBg = ch.enabled ? '#f0fdf4' : 'white';
           
-          return '<div style="border:2px solid ' + (ch.enabled ? '#10b981' : '#e0e0e0') + ';border-radius:12px;padding:20px;margin-bottom:16px;background:' + (ch.enabled ? '#f0fdf4' : 'white') + ';">' +
+          return '<div style="border:2px solid ' + enabledBorder + ';border-radius:12px;padding:20px;margin-bottom:16px;background:' + enabledBg + ';">' +
             '<div style="display:flex;justify-content:space-between;align-items:start;margin-bottom:12px;">' +
               '<div style="flex:1;">' +
                 '<div style="font-weight:600;font-size:16px;color:#333;margin-bottom:4px;">🔧 ' + ch.name + '</div>' +
@@ -3463,6 +3906,82 @@ function getAdminDashboard() {
       document.getElementById('variableHelpModal').classList.remove('show');
     }
     
+    // ==================== 通用对话框函数 ====================
+    
+    let confirmCallback = null;
+    
+    // 美化的确认对话框
+    function showConfirm(options) {
+      const {
+        title = '确认操作',
+        message = '确定要执行此操作吗？',
+        icon = '⚠️',
+        confirmText = '确定',
+        cancelText = '取消',
+        confirmColor = '',
+        onConfirm = () => {},
+        onCancel = () => {}
+      } = options;
+      
+      document.getElementById('confirmIcon').textContent = icon;
+      document.getElementById('confirmTitle').textContent = title;
+      document.getElementById('confirmMessage').textContent = message;
+      document.getElementById('confirmOkBtn').textContent = confirmText;
+      document.getElementById('confirmCancelBtn').textContent = cancelText;
+      
+      if (confirmColor) {
+        document.getElementById('confirmOkBtn').style.background = confirmColor;
+      } else {
+        document.getElementById('confirmOkBtn').style.background = '';
+      }
+      
+      confirmCallback = { onConfirm, onCancel };
+      
+      document.getElementById('confirmOkBtn').onclick = () => {
+        closeConfirmDialog();
+        onConfirm();
+      };
+      
+      document.getElementById('confirmDialog').classList.add('show');
+    }
+    
+    function closeConfirmDialog() {
+      document.getElementById('confirmDialog').classList.remove('show');
+      if (confirmCallback && confirmCallback.onCancel) {
+        confirmCallback.onCancel();
+      }
+      confirmCallback = null;
+    }
+    
+    // 美化的提示对话框
+    function showAlert(options) {
+      const {
+        title = '提示',
+        message = '操作提示信息',
+        icon = 'ℹ️',
+        onClose = () => {}
+      } = options;
+      
+      document.getElementById('alertIcon').textContent = icon;
+      document.getElementById('alertTitle').textContent = title;
+      document.getElementById('alertMessage').textContent = message;
+      
+      document.getElementById('alertDialog').classList.add('show');
+      
+      // 重新绑定关闭事件
+      const closeBtn = document.querySelector('#alertDialog .btn-primary');
+      closeBtn.onclick = () => {
+        closeAlertDialog();
+        onClose();
+      };
+    }
+    
+    function closeAlertDialog() {
+      document.getElementById('alertDialog').classList.remove('show');
+    }
+    
+    // ==================== 结束通用对话框函数 ====================
+    
     // ==================== 结束自定义通知渠道管理 ====================
     
     function toggleWebhookFields() {
@@ -3566,6 +4085,9 @@ function getAdminDashboard() {
  */
 function getNormalQRPage(qrId, qr) {
   const renderedContent = qr.content || '';
+  const hasLocation = qr.location || qr.privateLocation;
+  const [lng, lat] = hasLocation ? (qr.location || qr.privateLocation).split(',').map(s => s.trim()) : ['', ''];
+  
   return `<!DOCTYPE html>
 <html lang="zh-CN">
 <head>
@@ -3580,6 +4102,78 @@ function getNormalQRPage(qrId, qr) {
     <h1>${qr.title}</h1>
     ${qr.image ? `<div class="image-container"><img src="${qr.image}" alt="${qr.title}"></div>` : ''}
     <div class="content" id="content"></div>
+    ${hasLocation && lng && lat ? `
+    <div style="margin-top:24px;padding:20px;background:#f0f9ff;border-radius:12px;border:2px solid #3b82f6;">
+      <h3 style="margin:0 0 12px 0;font-size:18px;color:#1e40af;">📍 位置信息</h3>
+      <div style="font-size:14px;color:#666;margin-bottom:12px;">
+        <div style="margin-bottom:4px;">经度: ${lng}</div>
+        <div>纬度: ${lat}</div>
+      </div>
+      <button onclick="openNavigation()" style="width:100%;padding:14px;background:linear-gradient(135deg, #3b82f6 0%, #2563eb 100%);color:white;border:none;border-radius:10px;font-size:15px;font-weight:600;cursor:pointer;">
+        🧭 导航到此位置
+      </button>
+    </div>
+    <script>
+      function openNavigation() {
+        const ua = navigator.userAgent.toLowerCase();
+        const isIOS = /iphone|ipad|ipod/.test(ua);
+        const isAndroid = /android/.test(ua);
+        const isWeChat = /micromessenger/i.test(ua);
+        
+        const lng = ${lng};
+        const lat = ${lat};
+        const name = '${qr.title.replace(/'/g, "\\'")}';
+        
+        // 微信浏览器中提示用户在浏览器打开
+        if (isWeChat) {
+          alert('请点击右上角 ... 菜单\\n选择"在浏览器中打开"\\n以使用导航功能');
+          return;
+        }
+        
+        let schemeUrl;
+        let webUrl = 'https://uri.amap.com/navigation?to=' + lng + ',' + lat + ',' + encodeURIComponent(name) + '&mode=car&coordinate=gaode&callnative=1&src=webapp';
+        
+        if (isIOS) {
+          schemeUrl = 'iosamap://navi?sourceApplication=webapp&lat=' + lat + '&lon=' + lng + '&name=' + encodeURIComponent(name) + '&dev=0&style=2';
+        } else if (isAndroid) {
+          schemeUrl = 'androidamap://navi?sourceApplication=webapp&lat=' + lat + '&lon=' + lng + '&name=' + encodeURIComponent(name) + '&dev=0&style=2';
+        }
+        
+        // 提示用户选择
+        const useApp = confirm(
+          '🗺️ 导航方式选择\\n\\n' +
+          '点击"确定" - 尝试打开高德地图APP\\n' +
+          '点击"取消" - 使用网页版地图\\n\\n' +
+          '提示：网页版地图也可以查看路线并手动打开APP'
+        );
+        
+        if (useApp && schemeUrl) {
+          // 用户选择打开APP
+          window.location.href = schemeUrl;
+          
+          // 3秒后检查是否成功打开
+          setTimeout(function() {
+            if (!document.hidden) {
+              // 未能打开APP，询问是否下载
+              const download = confirm(
+                '未检测到高德地图APP\\n\\n' +
+                '点击"确定" - 前往下载高德地图\\n' +
+                '点击"取消" - 使用网页版地图'
+              );
+              if (download) {
+                window.location.href = 'https://mobile.amap.com/';
+              } else {
+                window.location.href = webUrl;
+              }
+            }
+          }, 3000);
+        } else {
+          // 用户选择网页版或不支持URL Scheme
+          window.location.href = webUrl;
+        }
+      }
+    </script>
+    ` : ''}
   </div>
   <script>
     const content = \`${renderedContent.replace(/`/g, '\\`')}\`;
@@ -3643,6 +4237,7 @@ function getAuthQRPage(qrId, qr, isOnline) {
     <div id="privateData" class="private-data">
       <h3>🔓 私密信息</h3>
       <div id="privateContent"></div>
+      <div id="privateLocation"></div>
     </div>
   </div>
 
@@ -3787,8 +4382,80 @@ function getAuthQRPage(qrId, qr, isOnline) {
         document.getElementById('privateContent').innerHTML = marked.parse(qr.privateContent);
         document.getElementById('privateData').classList.add('show');
       }
+      
+      // 显示位置（兼容privateLocation）
+      const locationData = qr.location || qr.privateLocation;
+      if (locationData) {
+        const locationDiv = document.getElementById('privateLocation');
+        const [lng, lat] = locationData.split(',').map(s => s.trim());
+        
+        if (lng && lat) {
+          locationDiv.innerHTML = \`
+            <div style="margin-top:20px;padding:16px;background:#f0f9ff;border-radius:12px;border:2px solid #3b82f6;">
+              <h3 style="margin:0 0 12px 0;font-size:18px;color:#1e40af;">📍 位置信息</h3>
+              <div style="font-size:14px;color:#666;margin-bottom:12px;">
+                <div style="margin-bottom:4px;">经度: \${lng}</div>
+                <div>纬度: \${lat}</div>
+              </div>
+              <button onclick="openAuthMapNavigation(\${lat}, \${lng})" class="btn btn-primary" style="width:100%;">
+                🧭 导航到此位置
+              </button>
+            </div>
+          \`;
+          locationDiv.classList.add('show');
+        }
+      }
+      
       document.getElementById('successModal').classList.add('show');
       document.getElementById('requestBtn').style.display = 'none';
+    }
+    
+    function openAuthMapNavigation(lat, lng) {
+      const ua = navigator.userAgent.toLowerCase();
+      const isIOS = /iphone|ipad|ipod/.test(ua);
+      const isAndroid = /android/.test(ua);
+      const isWeChat = /micromessenger/i.test(ua);
+      
+      if (isWeChat) {
+        alert('请点击右上角 ... 菜单\\n选择"在浏览器中打开"\\n以使用导航功能');
+        return;
+      }
+      
+      let schemeUrl;
+      let webUrl = 'https://uri.amap.com/navigation?to=' + lng + ',' + lat + ',私密位置&mode=car&coordinate=gaode&callnative=1&src=webapp';
+      
+      if (isIOS) {
+        schemeUrl = 'iosamap://navi?sourceApplication=webapp&lat=' + lat + '&lon=' + lng + '&name=私密位置&dev=0&style=2';
+      } else if (isAndroid) {
+        schemeUrl = 'androidamap://navi?sourceApplication=webapp&lat=' + lat + '&lon=' + lng + '&name=私密位置&dev=0&style=2';
+      }
+      
+      const useApp = confirm(
+        '🗺️ 导航方式选择\\n\\n' +
+        '点击"确定" - 尝试打开高德地图APP\\n' +
+        '点击"取消" - 使用网页版地图\\n\\n' +
+        '提示：网页版地图也可以查看路线并手动打开APP'
+      );
+      
+      if (useApp && schemeUrl) {
+        window.location.href = schemeUrl;
+        setTimeout(function() {
+          if (!document.hidden) {
+            const download = confirm(
+              '未检测到高德地图APP\\n\\n' +
+              '点击"确定" - 前往下载高德地图\\n' +
+              '点击"取消" - 使用网页版地图'
+            );
+            if (download) {
+              window.location.href = 'https://mobile.amap.com/';
+            } else {
+              window.location.href = webUrl;
+            }
+          }
+        }, 3000);
+      } else {
+        window.location.href = webUrl;
+      }
     }
     
     function showReject() {
@@ -3827,6 +4494,9 @@ function getAuthQRPage(qrId, qr, isOnline) {
  */
 function getContactQRPage(qrId, sessionId, qr, isOnline) {
   const renderedContent = qr.content || '';
+  const hasLocation = qr.location || qr.privateLocation;
+  const [lng, lat] = hasLocation ? (qr.location || qr.privateLocation).split(',').map(s => s.trim()) : ['', ''];
+  
   return `<!DOCTYPE html>
 <html lang="zh-CN">
 <head>
@@ -4033,6 +4703,19 @@ function getContactQRPage(qrId, sessionId, qr, isOnline) {
     ${qr.image ? `<div style="text-align:center;margin:20px 0;"><img src="${qr.image}" style="max-width:100%;border-radius:12px;"></div>` : ''}
     <div class="content" id="content"></div>
     
+    ${hasLocation && lng && lat ? `
+    <div style="margin:20px 0;padding:16px;background:#e0f2fe;border-radius:12px;border:2px solid #0ea5e9;">
+      <h3 style="margin:0 0 10px 0;font-size:16px;color:#0c4a6e;">📍 位置信息</h3>
+      <div style="font-size:13px;color:#0369a1;margin-bottom:10px;">
+        <div>经度: ${lng}</div>
+        <div>纬度: ${lat}</div>
+      </div>
+      <button onclick="openContactLocation()" style="width:100%;padding:12px;background:linear-gradient(135deg, #0ea5e9 0%, #0284c7 100%);color:white;border:none;border-radius:8px;font-size:14px;font-weight:600;cursor:pointer;">
+        🧭 导航到此位置
+      </button>
+    </div>
+    ` : ''}
+    
     <div class="status">
       ${isOnline 
         ? '✅ 管理员在线，消息将实时送达' 
@@ -4056,8 +4739,11 @@ function getContactQRPage(qrId, sessionId, qr, isOnline) {
       <div class="chat-messages" id="chatMessages"></div>
       <div class="message-input">
         <input type="file" id="chatImageInput" accept="image/*" onchange="handleChatImageSelect(this)" style="display:none;">
-        <button class="btn" style="background:#e0e0e0;color:#333;padding:12px 16px;border-radius:10px;" onclick="document.getElementById('chatImageInput').click()">
-          📎 图片
+        <button class="btn" style="background:#e0e0e0;color:#333;padding:12px 16px;border-radius:10px;" onclick="document.getElementById('chatImageInput').click()" title="发送图片">
+          📎
+        </button>
+        <button class="btn" style="background:#e0e0e0;color:#333;padding:12px 16px;border-radius:10px;" onclick="sendUserLocation()" title="发送位置">
+          📍
         </button>
         <textarea id="chatInput" placeholder="输入消息..." rows="2"></textarea>
         <button class="btn" onclick="sendChatMessage()" style="align-self:flex-end;padding:12px 24px;border-radius:10px;">发送</button>
@@ -4106,6 +4792,61 @@ function getContactQRPage(qrId, sessionId, qr, isOnline) {
     let isAdminOnline = ${hasAdmin};
     
     document.getElementById('content').innerHTML = marked.parse(content);
+    
+    ${hasLocation && lng && lat ? `
+    // 打开位置导航
+    function openContactLocation() {
+      const ua = navigator.userAgent.toLowerCase();
+      const isIOS = /iphone|ipad|ipod/.test(ua);
+      const isAndroid = /android/.test(ua);
+      const isWeChat = /micromessenger/i.test(ua);
+      
+      const lng = ${lng};
+      const lat = ${lat};
+      const name = '${qr.title.replace(/'/g, "\\'")}';
+      
+      if (isWeChat) {
+        alert('请点击右上角 ... 菜单\\n选择"在浏览器中打开"\\n以使用导航功能');
+        return;
+      }
+      
+      let schemeUrl;
+      let webUrl = 'https://uri.amap.com/navigation?to=' + lng + ',' + lat + ',' + encodeURIComponent(name) + '&mode=car&coordinate=gaode&callnative=1&src=webapp';
+      
+      if (isIOS) {
+        schemeUrl = 'iosamap://navi?sourceApplication=webapp&lat=' + lat + '&lon=' + lng + '&name=' + encodeURIComponent(name) + '&dev=0&style=2';
+      } else if (isAndroid) {
+        schemeUrl = 'androidamap://navi?sourceApplication=webapp&lat=' + lat + '&lon=' + lng + '&name=' + encodeURIComponent(name) + '&dev=0&style=2';
+      }
+      
+      const useApp = confirm(
+        '🗺️ 导航方式选择\\n\\n' +
+        '点击"确定" - 尝试打开高德地图APP\\n' +
+        '点击"取消" - 使用网页版地图\\n\\n' +
+        '提示：网页版地图也可以查看路线并手动打开APP'
+      );
+      
+      if (useApp && schemeUrl) {
+        window.location.href = schemeUrl;
+        setTimeout(function() {
+          if (!document.hidden) {
+            const download = confirm(
+              '未检测到高德地图APP\\n\\n' +
+              '点击"确定" - 前往下载高德地图\\n' +
+              '点击"取消" - 使用网页版地图'
+            );
+            if (download) {
+              window.location.href = 'https://mobile.amap.com/';
+            } else {
+              window.location.href = webUrl;
+            }
+          }
+        }, 3000);
+      } else {
+        window.location.href = webUrl;
+      }
+    }
+    ` : ''}
     
     // 立即连接WebSocket
     connectWebSocket();
@@ -4163,7 +4904,56 @@ function getContactQRPage(qrId, sessionId, qr, isOnline) {
       }
       
       if (data.type === 'chat_message' && data.sessionId === sessionId && data.from === 'admin') {
-        addMessageToChat(data.message, 'admin', data.imageUrl, data.timestamp);
+        addMessageToChat(data.message, 'admin', data.imageUrl, data.timestamp, data.location);
+      }
+    }
+    
+    // 游客端打开地图导航
+    function openUserMapNavigation(latitude, longitude) {
+      const ua = navigator.userAgent.toLowerCase();
+      const isIOS = /iphone|ipad|ipod/.test(ua);
+      const isAndroid = /android/.test(ua);
+      const isWeChat = /micromessenger/i.test(ua);
+      
+      if (isWeChat) {
+        alert('请点击右上角 ... 菜单\\n选择"在浏览器中打开"\\n以使用导航功能');
+        return;
+      }
+      
+      let schemeUrl;
+      let webUrl = 'https://uri.amap.com/navigation?to=' + longitude + ',' + latitude + ',位置&mode=car&coordinate=gaode&callnative=1&src=webapp';
+      
+      if (isIOS) {
+        schemeUrl = 'iosamap://navi?sourceApplication=webapp&lat=' + latitude + '&lon=' + longitude + '&name=位置&dev=0&style=2';
+      } else if (isAndroid) {
+        schemeUrl = 'androidamap://navi?sourceApplication=webapp&lat=' + latitude + '&lon=' + longitude + '&name=位置&dev=0&style=2';
+      }
+      
+      const useApp = confirm(
+        '🗺️ 导航方式选择\\n\\n' +
+        '点击"确定" - 尝试打开高德地图APP\\n' +
+        '点击"取消" - 使用网页版地图\\n\\n' +
+        '提示：网页版地图也可以查看路线并手动打开APP'
+      );
+      
+      if (useApp && schemeUrl) {
+        window.location.href = schemeUrl;
+        setTimeout(function() {
+          if (!document.hidden) {
+            const download = confirm(
+              '未检测到高德地图APP\\n\\n' +
+              '点击"确定" - 前往下载高德地图\\n' +
+              '点击"取消" - 使用网页版地图'
+            );
+            if (download) {
+              window.location.href = 'https://mobile.amap.com/';
+            } else {
+              window.location.href = webUrl;
+            }
+          }
+        }, 3000);
+      } else {
+        window.location.href = webUrl;
       }
     }
     
@@ -4290,7 +5080,73 @@ function getContactQRPage(qrId, sessionId, qr, isOnline) {
       }
     }
     
-    function addMessageToChat(message, from, imageUrl, timestamp) {
+    // 游客发送位置
+    async function sendUserLocation() {
+      if (!ws || ws.readyState !== WebSocket.OPEN) {
+        alert('未连接到聊天');
+        return;
+      }
+      
+      if (!navigator.geolocation) {
+        alert('您的浏览器不支持地理位置功能');
+        return;
+      }
+      
+      const loadingMsg = document.createElement('div');
+      loadingMsg.style.cssText = 'position:fixed;top:50%;left:50%;transform:translate(-50%,-50%);background:rgba(0,0,0,0.8);color:white;padding:20px 40px;border-radius:8px;z-index:10000;';
+      loadingMsg.textContent = '正在获取位置信息...';
+      document.body.appendChild(loadingMsg);
+      
+      try {
+        const position = await new Promise((resolve, reject) => {
+          navigator.geolocation.getCurrentPosition(resolve, reject, {
+            enableHighAccuracy: true,
+            timeout: 10000,
+            maximumAge: 0
+          });
+        });
+        
+        const latitude = position.coords.latitude;
+        const longitude = position.coords.longitude;
+        
+        const msgData = {
+          qrId,
+          sessionId,
+          from: 'user',
+          message: '',
+          location: {
+            latitude: latitude,
+            longitude: longitude,
+            accuracy: position.coords.accuracy
+          },
+          timestamp: Date.now()
+        };
+        
+        ws.send(JSON.stringify({
+          type: 'chat_message',
+          payload: msgData,
+          to: 'admin'
+        }));
+        
+        const locationText = '📍 位置: ' + latitude.toFixed(6) + ', ' + longitude.toFixed(6);
+        addMessageToChat(locationText, 'user', null, Date.now(), msgData.location);
+        
+      } catch (error) {
+        let errorMsg = '获取位置失败';
+        if (error.code === 1) {
+          errorMsg = '您拒绝了位置权限请求';
+        } else if (error.code === 2) {
+          errorMsg = '无法获取位置信息';
+        } else if (error.code === 3) {
+          errorMsg = '获取位置超时';
+        }
+        alert(errorMsg);
+      } finally {
+        document.body.removeChild(loadingMsg);
+      }
+    }
+    
+    function addMessageToChat(message, from, imageUrl, timestamp, location) {
       const messagesContainer = document.getElementById('chatMessages');
       const messageDiv = document.createElement('div');
       messageDiv.className = \`chat-message \${from}\`;
@@ -4311,6 +5167,24 @@ function getContactQRPage(qrId, sessionId, qr, isOnline) {
         img.style.borderRadius = '8px';
         img.style.marginTop = message ? '8px' : '0';
         bubble.appendChild(img);
+      }
+      
+      // 添加位置显示
+      if (location && location.latitude && location.longitude) {
+        const locationDiv = document.createElement('div');
+        locationDiv.style.cssText = 'margin-top:8px;padding:10px;background:rgba(0,0,0,0.05);border-radius:6px;font-size:13px;';
+        
+        const lat = location.latitude.toFixed(6);
+        const lng = location.longitude.toFixed(6);
+        
+        locationDiv.innerHTML = \`
+          <div style="font-weight:600;margin-bottom:6px;">📍 位置信息</div>
+          <div style="font-size:12px;opacity:0.8;">经度: \${lng}</div>
+          <div style="font-size:12px;opacity:0.8;margin-bottom:8px;">纬度: \${lat}</div>
+          <button style="background:white;color:#333;border:1px solid #ddd;padding:6px 12px;border-radius:6px;font-size:12px;cursor:pointer;font-weight:600;" onclick="openUserMapNavigation(\${lat}, \${lng})">🧭 查看地图</button>
+        \`;
+        
+        bubble.appendChild(locationDiv);
       }
       
       if (timestamp) {
@@ -4472,3 +5346,7 @@ function getChatDecisionResultPage(action, qr) {
 </body>
 </html>`;
 }
+
+/**
+ * 离线二维码页面
+ */
